@@ -9,6 +9,9 @@ from torch_geometric.datasets import Planetoid
 from torch_geometric.logging import init_wandb, log
 from torch_geometric.nn import GCNConv
 
+from torch_geometric.typing import OptTensor
+from typing import Optional
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='Cora')
 parser.add_argument('--hidden_channels', type=int, default=16)
@@ -39,28 +42,32 @@ if args.use_gdc:
 
 
 class GCN(torch.nn.Module):
+    edg_w: Optional[torch.Tensor]
     def __init__(self, in_channels, hidden_channels, out_channels):
         super().__init__()
         self.conv1 = GCNConv(in_channels, hidden_channels, cached=True,
-                             normalize=not args.use_gdc)
+                             normalize=not args.use_gdc).jittable()
         self.conv2 = GCNConv(hidden_channels, out_channels, cached=True,
-                             normalize=not args.use_gdc)
+                             normalize=not args.use_gdc).jittable()
+        self.edg_w = None
 
     def forward(self, x, edge_index, edge_weight=None):
+        self.edg_w = edge_weight
         x = F.dropout(x, p=0.5, training=self.training)
-        x = self.conv1(x, edge_index, edge_weight).relu()
+        x = self.conv1(x, edge_index, self.edg_w).relu()
         x = F.dropout(x, p=0.5, training=self.training)
-        x = self.conv2(x, edge_index, edge_weight)
+        x = self.conv2(x, edge_index, self.edg_w)
         return x
 
 
 model = GCN(dataset.num_features, args.hidden_channels, dataset.num_classes)
 model, data = model.to(device), data.to(device)
+model = torch.jit.script(model)
+
 optimizer = torch.optim.Adam([
     dict(params=model.conv1.parameters(), weight_decay=5e-4),
     dict(params=model.conv2.parameters(), weight_decay=0)
 ], lr=args.lr)  # Only perform weight-decay on first convolution.
-
 
 def train():
     model.train()
